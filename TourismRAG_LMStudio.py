@@ -8,18 +8,7 @@ from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import CrossEncoder
 import gc
 
-# ----- Load data -----
-country = sys.argv[1] if len(sys.argv) > 1 else "Spain"
-json_path = os.path.join("data", f"wikivoyage_{country}.json")
 
-with open(json_path, 'r', encoding='utf-8') as f:
-    chunks = json.load(f)
-
-texts = [c['text'] for c in chunks]
-ids = [int(c['chunk_id']) for c in chunks]
-links = [c['wiki_url'] for c in chunks]
-id2text = dict(zip(ids, texts))
-id2link = dict(zip(ids, links))
 
 # ----- Embedding API -----
 def get_embeddings(texts):
@@ -33,23 +22,14 @@ def get_embeddings(texts):
     )
     return np.array([e["embedding"] for e in response.json()["data"]])
 
-# ----- Reranker -----
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
 
 def rerank(query, passages):
     pairs = [(query, p) for p in passages]
     scores = reranker.predict(pairs)
     return list(scores)
 
-# ----- Create FAISS index -----
-print("Creating embeddings...")
-embeddings = get_embeddings(texts)
-embedding_dim = embeddings.shape[1]
-index = faiss.IndexIDMap(faiss.IndexFlatIP(embedding_dim))
-index.add_with_ids(np.array(embeddings), np.array(ids))
 
-del embeddings
-gc.collect()
 
 # ----- Flask app -----
 app = Flask(__name__)
@@ -160,9 +140,9 @@ Answer:"""
             "http://127.0.0.1:1234/v1/completions",
             headers={"Content-Type": "application/json"},
             json={
-                "model": "deepseek-r1-distill-qwen-7b",
+                "model": "gemma-2-9b-it", # "deepseek-r1-distill-qwen-7b",
                 "prompt": prompt,
-                "max_tokens": 1024,
+                "max_tokens": 512,
                 "temperature": 0.7
             }
         )
@@ -173,4 +153,42 @@ Answer:"""
     return f"{output}\n\nFor more info, consult:\n{link_text}"
 
 if __name__ == "__main__":
+
+    # ----- Load data -----
+    country = sys.argv[1] if len(sys.argv) > 1 else "Spain"
+    json_path = os.path.join("data", f"wikivoyage_{country}.json")
+
+    print("Loading wikivoyage data...")
+    with open(json_path, 'r', encoding='utf-8') as f:
+        chunks = json.load(f)
+    print("extracting elements...")
+    texts = [c['text'] for c in chunks]
+    ids = [int(c['chunk_id']) for c in chunks]
+    links = [c['wiki_url'] for c in chunks]
+    id2text = dict(zip(ids, texts))
+    id2link = dict(zip(ids, links))
+
+    
+    # ----- Reranker -----
+    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+    # ----- Load/ Create FAISS index -----
+    faiss_path = os.path.join("data", f"faiss_{country}.index")
+
+
+    if os.path.exists(faiss_path):
+        print("Loading FAISS index from disk...")
+        index = faiss.read_index(faiss_path)
+    else:
+        print("Creating embeddings (only once) ...")
+        embeddings = get_embeddings(texts)
+        embedding_dim = embeddings.shape[1]
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(embedding_dim))
+        index.add_with_ids(np.array(embeddings), np.array(ids))
+        print("Saving FAISS database to disk...")
+        faiss.write_index(index, faiss_path)
+        del embeddings
+        gc.collect()
+
+    print("Starting up App...")
     app.run()

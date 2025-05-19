@@ -4,7 +4,8 @@ import json
 import os
 import sys
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
+from flask_session import Session
 from sentence_transformers import CrossEncoder
 import gc
 
@@ -34,6 +35,10 @@ def rerank(query, passages):
 # ----- Flask app -----
 app = Flask(__name__)
 
+app.secret_key = "my_secret_key"  # Needed for session
+app.config["SESSION_TYPE"] = "filesystem"
+Session(app)
+
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
@@ -47,12 +52,8 @@ HTML_TEMPLATE = """
             margin: auto;
             padding: 2em;
         }
-        h1 {
-            color: #e53935;
-        }
-        h2 {
-            color: #3949ab;
-        }
+        h1 { color: #e53935; }
+        h2 { color: #3949ab; }
         textarea, button {
             width: 100%;
             padding: 1em;
@@ -74,10 +75,26 @@ HTML_TEMPLATE = """
             border-radius: 8px;
             border: 1px solid #ddd;
         }
-        a {
-            color: #1e88e5;
+        .conversation {
+            margin-top: 2em;
+            background: #fafafa;
+            border-left: 4px solid #3949ab;
+            padding: 1em;
         }
+        .user { font-weight: bold; color: #1e88e5; }
+        .bot { color: #555; }
     </style>
+    <script>
+        window.onload = () => {
+            const textarea = document.querySelector("textarea");
+            textarea.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    this.form.submit();
+                }
+            });
+        };
+    </script>
 </head>
 <body>
     <h1>Discover {{ country }}</h1>
@@ -85,9 +102,15 @@ HTML_TEMPLATE = """
         <textarea name="query" rows="4" placeholder="Ask anything about the country...">{{ query or "" }}</textarea>
         <button type="submit">Get Answer</button>
     </form>
-    {% if answer %}
-    <h2>Answer</h2>
-    <pre>{{ answer }}</pre>
+
+    {% if history %}
+    <div class="conversation">
+        {% for item in history %}
+            <p><span class="user">You:</span> {{ item.query }}</p>
+            <p><span class="bot">Bot:</span> {{ item.answer }}</p>
+            <hr>
+        {% endfor %}
+    </div>
     {% endif %}
 </body>
 </html>
@@ -95,12 +118,19 @@ HTML_TEMPLATE = """
 
 @app.route("/", methods=["GET", "POST"])
 def index_page():
+    if "history" not in session:
+        session["history"] = []
+
     query = ""
     answer = ""
     if request.method == "POST":
         query = request.form.get("query", "")
         answer = get_answer(query)
-    return render_template_string(HTML_TEMPLATE, query=query, answer=answer, country=country)
+        session["history"].append({"query": query, "answer": answer})
+        session.modified = True  # To ensure session saves the update
+
+    return render_template_string(HTML_TEMPLATE, query=query, answer=answer,
+                                  history=session["history"], country=country)
 
 @app.route("/ask", methods=["POST"])
 def api_endpoint():
@@ -140,7 +170,7 @@ Answer:"""
             "http://127.0.0.1:1234/v1/completions",
             headers={"Content-Type": "application/json"},
             json={
-                "model": "gemma-2-9b-it", # "deepseek-r1-distill-qwen-7b",
+                "model": "gemma-2-2b-it", # "gemma-2-9b-it", # "deepseek-r1-distill-qwen-7b",
                 "prompt": prompt,
                 "max_tokens": 512,
                 "temperature": 0.7
